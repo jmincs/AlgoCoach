@@ -9,10 +9,14 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@langchain/openai": "^0.2.11",
     "firebase": "^12.0.0",
+    "langchain": "^0.2.20",
     "next": "15.4.5",
+    "openai": "^5.12.2",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "zod": "^4.0.17"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
