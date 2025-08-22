@@ -25,6 +25,9 @@ const ChatRequestSchema = z.object({
   messages: z.array(ChatMessageSchema).min(1).max(64),
   code: z.string().optional().default(''),
   uid: z.string().optional(),
+  interviewer: z.boolean().optional(),
+  topic: z.string().optional(),
+  autoWorkspace: z.boolean().optional().default(false),
 });
 
 /** ---------- Dual-Mode System Prompt (Interviewer + Coach) ---------- */
@@ -33,13 +36,13 @@ const DUAL_BASE_PROMPT = `
 
 You are **CodeBuddy**, an AI that can operate in two complementary modes:
 
-- **Interviewer Mode** (trigger if user requests "start interview", "mock interview", "interview me", "ask me a question", "give me an interview question", "begin interview", "simulate interview", "whiteboard", etc.):
+- **Interviewer Mode**:
   Simulate a senior SWE interviewer for DSA/system/code walkthroughs.
 
 - **Coach Mode** (default):
   A concise, supportive mentor who explains, debugs, refactors, and analyzes complexity with minimal but precise steps.
 
-Always stay professional, encouraging, and technical. Avoid fluff. Favor structured, scannable answers.
+Always be professional, encouraging, and technical. Avoid fluff. Favor structured, scannable answers.
 
 ## Global Constraints
 1) Be precise & actionable; prefer bullet points/numbered steps. Minimal but representative examples.
@@ -58,32 +61,17 @@ Always stay professional, encouraging, and technical. Avoid fluff. Favor structu
 5) Complexity Discussion (mandatory).
 6) Edge Cases & Tests (≥3: smallest, typical, tricky).
 7) Code Review (if code posted): use the Code Review Checklist.
-8) Scoring & Feedback: 0–4 on Problem Solving, Correctness, Complexity, Communication, Code Quality + 1–2 action items.
+8) Scoring & Feedback (0–4 on Problem Solving, Correctness, Complexity, Communication, Code Quality) + 1–2 action items.
 9) Next Steps: one follow-up or harder variant.
 
-If the user is already mid-problem (they pasted code first), skip to steps 5–8, but ask one probing question about intended approach.
-
 ## Coach Mode — Mentoring Tracks
-- **Explain Track:** tight concept, minimal example, 1–2 drills.
-- **Debug Track:** (1) restate bug, (2) likely root causes, (3) minimal counterexample trace, (4) pinpoint line/invariant, (5) minimal fix + tiny test. If no code, ask for smallest repro.
-- **Refactor Track:** 3–5 improvements (naming/structure/DS/complexity/edges). Show small before/after or focused diff.
-- **Complexity Track:** Big-O time/space, dominating operation, one realistic optimization (+ trade-off).
+- Explain / Debug / Refactor / Complexity as requested.
 
-## Code Review Checklist (use in Interviewer step 7 or Coach/Refactor)
-- Correctness & Edge Handling: off-by-one, empties, duplicates, negatives, overflow.
-- Invariants: window bounds, pointer moves, visited markers, DP transitions.
-- Complexity: unnecessary passes, nested loops, DS choices.
-- Readability: names, function size, early returns, comments explaining WHY.
-- Safety: bounds checks, null/undefined, integer overflow (JS Number limits), input validation.
-- Tests: smallest, typical, adversarial.
+## Code Review Checklist
+- Correctness & edges; invariants; complexity; readability; safety; tests.
 
-## Pattern Hints (tie to RAG)
-- Sliding Window: maintain invariant; move left while broken.
-- Two Pointers: sorted/orderable domain; explicit move rule.
-- Binary Search on Answer: monotonic predicate; define feasible(x).
-- Heap/Greedy: exchange argument; local→global optimality.
-- Graph Traversal: BFS for shortest path (unweighted); detect cycles; mark visited.
-- DP: define state/transition/base; consider tabulation + space optimization.
+## Pattern Hints
+- Sliding Window / Two Pointers / Binary Search (answer) / Greedy / Graph Traversal / DP.
 
 ## Output Discipline
 - Prefer labeled sections (Approach, Complexity, Edge Cases, Tests, Next Steps).
@@ -95,126 +83,38 @@ If the user is already mid-problem (they pasted code first), skip to steps 5–8
 const algorithmicPatterns = [
   `Dynamic Programming Pattern:
 Key Concepts:
-1. Optimal Substructure: Problem can be broken into smaller subproblems whose optimal solutions compose an optimal global solution.
-2. Overlapping Subproblems: The same subproblems appear multiple times.
+1. Optimal Substructure
+2. Overlapping Subproblems
 
-Common Approaches:
-1. Top-down (Memoization):
-   - Start with the main problem and recurse down.
-   - Cache results of subproblems to avoid recomputation.
-2. Bottom-up (Tabulation):
-   - Solve from smallest subproblems up to the main problem.
-   - Use arrays/tables; often more space/time predictable.
+Approaches:
+- Top-down (Memoization)
+- Bottom-up (Tabulation)
 
 Implementation Tips:
-- Identify state variables (indices, capacities, flags).
-- Define recurrence relation precisely.
-- Handle base cases carefully.
-- Consider space optimization (rolling arrays) when only a few previous states are needed.
-- Beware integer overflows and large table sizes.
-- Validate transitions and constraints (e.g., bounds, prerequisites).`,
+- Identify state, recurrence, base cases
+- Space optimization when possible`,
 
   `Sliding Window Pattern:
-Key Concepts:
-1. Fixed Window: Window size remains constant; slide by adding one element and removing one.
-2. Dynamic Window: Window size expands/contracts based on a maintained invariant (e.g., sum ≤ K, unique chars only).
-
-Implementation Steps:
-1. Initialize pointers (start, end) and state (e.g., counts, sum).
-2. Expand window (move end) and incorporate new element.
-3. While invariant breaks, contract window (move start) and remove element effects.
-4. Update result during movements (max/min length, count, etc.).
-
-Common Applications:
-- Longest/shortest substring with constraints
-- Subarray sums, averages
-- Stream processing with limited memory
-
-Pitfalls:
-- Off-by-one at boundaries
-- Not updating result at the correct time
-- Forgetting to decrement counts when contracting`,
+- Fixed vs Dynamic windows
+- Maintain invariant; expand right; shrink left when broken
+- Common pitfalls: off-by-one, not updating result during moves`,
 
   `Two Pointers Pattern:
-Types:
-1. Same Direction: Both pointers move forward (fast/slow, read/write).
-2. Opposite Direction: Pointers move toward each other (left/right endpoints).
+- Same vs opposite direction
+- Use order to prune
+- Pitfalls: infinite loops, double counting`,
 
-Common Applications:
-- Array deduplication / partitioning
-- Linked list cycle detection (Floyd)
-- Palindrome checks, pair sums in sorted arrays
-- In-place transformations without extra space
-
-Implementation Tips:
-- Initialize pointers strategically (start/end, slow/fast).
-- Define precise movement conditions for each pointer.
-- Prove termination and correctness (invariants).
-- For sorted arrays, leverage order to prune search.
-
-Pitfalls:
-- Infinite loops when neither pointer moves on some cases
-- Skipping or double-counting elements`,
-
-  `Graph Traversal Patterns:
-Key Approaches:
-1. Depth-First Search (DFS):
-   - Stack/recursion; explore as far as possible then backtrack.
-   - Great for connected components, topological order (DAG), cycle detection.
-2. Breadth-First Search (BFS):
-   - Queue; explores level by level.
-   - Shortest path in unweighted graphs, minimum hops, spreading processes.
-
-Implementation Tips:
-- Track visited to avoid cycles; for grids, careful bounds checks.
-- For BFS shortest paths, record parent/predecessor for path reconstruction.
-- For weighted graphs, use Dijkstra (non-negative) or Bellman-Ford (negatives allowed).
-- Consider space complexity: recursion depth for DFS; queue growth for BFS.
-
-Pitfalls:
-- Forgetting to mark visited at the right time
-- Revisiting nodes due to multiple enqueues or late marking`,
+  `Graph Traversal:
+- DFS/BFS; visited tracking
+- BFS for shortest paths in unweighted graphs`,
 
   `Binary Search Pattern:
-Key Concepts:
-1. Search Space must be sorted or conceptually monotonic.
-2. Midpoint Calculation: Use mid = lo + (hi - lo) // 2 to avoid overflow.
+- Monotonic predicate; bounds & termination
+- Lower/upper bound variants; search on answer`,
 
-Implementation Tips:
-- Define clearly: inclusive/exclusive bounds (lo/hi), and termination condition.
-- Choose which side to keep when mid satisfies predicate.
-- Consider "Binary Search on Answer": define feasible(x) monotonic and search minimal x.
-
-Variations:
-- Exact match (first/any occurrence)
-- Lower bound / upper bound (first ≥ x, last ≤ x)
-- Search on implicit domain (answer, capacity, time)
-
-Pitfalls:
-- Infinite loops when bounds don’t move
-- Off-by-one when returning lo/hi/mid`,
-
-  `Backtracking Pattern:
-Key Concepts:
-1. Decision Space: All possible choices at each step.
-2. Constraints: Valid state / pruning conditions.
-3. Goal State: When a complete solution is formed.
-
-Implementation Steps:
-1. Choose: Make a decision (add element/option).
-2. Explore: Recurse with new state.
-3. Unchoose: Undo decision to try next option.
-
-Optimization Tips:
-- Prune invalid paths early (constraints).
-- Order choices to reduce branching (e.g., most constrained first).
-- Represent state efficiently (bitmasks, fixed arrays).
-- Memoize when subproblems repeat (turning into DP).
-
-Pitfalls:
-- Not backtracking (forgetting to undo)
-- Exponential blowup without pruning
-- Duplicates when state not canonicalized`,
+  `Backtracking:
+- Choose → Explore → Unchoose
+- Prune early; memoize if repeats`,
 ];
 
 /** ---------- RAG-lite: embed once and keep in memory ---------- */
@@ -232,7 +132,6 @@ async function ensureEmbeddingsReady() {
 
 async function retrieveRelevantPatterns(query: string, k = 2): Promise<string> {
   if (!vectorStore) return '';
-  // Some LC versions don’t type this on MemoryVectorStore; it exists at runtime.
   // @ts-ignore
   const docs = await vectorStore.similaritySearch(query.slice(0, 600), k);
   return docs.map((d: any) => d.pageContent.trim()).join('\n\n');
@@ -243,23 +142,17 @@ function trimHistory(messages: Array<{ role: string; content: string }>) {
   const nonSys = messages.filter(m => m.role !== 'system');
   return nonSys.slice(-MAX_HISTORY);
 }
-
 function clampInput(text: string, max: number) {
   return text.length > max ? text.slice(0, max) : text;
 }
-
-/** Normalize to the only roles we use so TS doesn’t drag in function/tool variants */
 type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: string };
-
 function buildMessages(systemPrompt: string, history: Array<{ role: string; content: string }>, code?: string): ChatMsg[] {
   const composed: ChatMsg[] = [{ role: 'system', content: systemPrompt }];
-
   const safeHistory: ChatMsg[] = trimHistory(history).map(m => ({
     role: (m.role === 'assistant' ? 'assistant' : 'user'),
     content: m.content,
   }));
   composed.push(...safeHistory);
-
   if (code && code.length) {
     composed.push({
       role: 'user',
@@ -269,26 +162,154 @@ function buildMessages(systemPrompt: string, history: Array<{ role: string; cont
   return composed;
 }
 
-/** Detects interview intent from the latest user messages */
+/** Detects interview intent from recent user messages (fallback only) */
 function detectInterviewerIntent(history: Array<{ role: string; content: string }>): boolean {
-  const lastTwoUser = history
-    .filter(m => m.role === 'user')
-    .slice(-2)
-    .map(m => m.content.toLowerCase());
-
-  const triggers = [
-    'start interview',
-    'mock interview',
-    'interview me',
-    'ask me a question',
-    'give me an interview question',
-    'begin interview',
-    'simulate interview',
-    'whiteboard',
-    'follow-up question',
-  ];
-
+  const lastTwoUser = history.filter(m => m.role === 'user').slice(-2).map(m => m.content.toLowerCase());
+  const triggers = ['start interview','mock interview','interview me','ask me a question','give me an interview question','begin interview','simulate interview','whiteboard','follow-up question'];
   return lastTwoUser.some(msg => triggers.some(t => msg.includes(t)));
+}
+
+/** ---------- Workspace templates ---------- */
+type Workspace = {
+  language: 'python',
+  functionName: string,
+  params: string[],
+  starterCode: string,
+  tests: Array<{ name: string, args: any[], expect: any }>,
+};
+
+// Python stub (def ...: + pass)
+function pyStub(name: string, params: string[]) {
+  const args = params.join(', ');
+  return `def ${name}(${args}):
+    # TODO: implement
+    pass
+`;
+}
+
+// If you prefer Pythonic snake_case names, you can rename below.
+// Just ensure functionName matches the def in starterCode.
+function workspaceForTopic(rawTopic?: string): Workspace {
+  const t = (rawTopic || '').toLowerCase();
+  if (t.includes('two pointer')) {
+    return {
+      language: 'python',
+      functionName: 'is_palindrome',
+      params: ['s'],
+      starterCode: pyStub('is_palindrome', ['s']),
+      tests: [
+        { name: 'racecar', args: ['racecar'], expect: true },
+        { name: 'abba', args: ['abba'], expect: true },
+        { name: 'abc', args: ['abc'], expect: false },
+      ],
+    };
+  }
+  if (t.includes('sliding')) {
+    return {
+      language: 'python',
+      functionName: 'max_subarray_sum_of_size_k',
+      params: ['arr', 'k'],
+      starterCode: pyStub('max_subarray_sum_of_size_k', ['arr', 'k']),
+      tests: [
+        { name: 'k=2', args: [[1,2,3,4,5], 2], expect: 9 },
+        { name: 'k=3', args: [[2,1,5,1,3,2], 3], expect: 9 },
+      ],
+    };
+  }
+  if (t.includes('binary search')) {
+    return {
+      language: 'python',
+      functionName: 'binary_search',
+      params: ['arr', 'target'],
+      starterCode: pyStub('binary_search', ['arr', 'target']),
+      tests: [
+        { name: 'found', args: [[1,2,3,4], 3], expect: 2 },
+        { name: 'not found', args: [[1,2,4,5], 3], expect: -1 },
+      ],
+    };
+  }
+  if (t.includes('hash')) {
+    return {
+      language: 'python',
+      functionName: 'two_sum',
+      params: ['nums', 'target'],
+      starterCode: pyStub('two_sum', ['nums', 'target']),
+      tests: [
+        { name: 'classic', args: [[2,7,11,15], 9], expect: [0,1] },
+        { name: 'another', args: [[3,2,4], 6], expect: [1,2] },
+      ],
+    };
+  }
+  if (t.includes('stack') || t.includes('queue')) {
+    return {
+      language: 'python',
+      functionName: 'is_valid_parentheses',
+      params: ['s'],
+      starterCode: pyStub('is_valid_parentheses', ['s']),
+      tests: [
+        { name: 'ok', args: ['()[]{}'], expect: true },
+        { name: 'bad', args: ['([)]'], expect: false },
+        { name: 'nested', args: ['({[]})'], expect: true },
+      ],
+    };
+  }
+  if (t.includes('graph') || t.includes('bfs') || t.includes('dfs')) {
+    return {
+      language: 'python',
+      functionName: 'num_islands',
+      params: ['grid'],
+      starterCode: pyStub('num_islands', ['grid']),
+      tests: [
+        { name: 'small', args: [[['1','1','0'],['0','1','0'],['0','0','1']]], expect: 2 },
+        { name: 'single', args: [[['1']]], expect: 1 },
+      ],
+    };
+  }
+  if (t.includes('tree') || t.includes('bst')) {
+    return {
+      language: 'python',
+      functionName: 'sorted_array_to_bst_height',
+      params: ['nums'],
+      starterCode: pyStub('sorted_array_to_bst_height', ['nums']),
+      tests: [
+        { name: 'empty', args: [[]], expect: 0 },
+        { name: 'len3', args: [[-10,0,5]], expect: 2 },
+      ],
+    };
+  }
+  if (t.includes('dynamic')) {
+    return {
+      language: 'python',
+      functionName: 'climb_stairs',
+      params: ['n'],
+      starterCode: pyStub('climb_stairs', ['n']),
+      tests: [
+        { name: 'n=1', args: [1], expect: 1 },
+        { name: 'n=2', args: [2], expect: 2 },
+        { name: 'n=5', args: [5], expect: 8 },
+      ],
+    };
+  }
+  // Arrays / Strings or default
+  return {
+    language: 'python',
+    functionName: 'length_of_longest_substring',
+    params: ['s'],
+    starterCode: pyStub('length_of_longest_substring', ['s']),
+    tests: [
+      { name: 'abcabcbb', args: ['abcabcbb'], expect: 3 },
+      { name: 'bbbb', args: ['bbbb'], expect: 1 },
+      { name: 'pwwkew', args: ['pwwkew'], expect: 3 },
+      { name: 'empty', args: [''], expect: 0 },
+    ],
+  };
+}
+
+function formatWorkspaceBlock(ws: Workspace) {
+  return `<<<WORKSPACE_JSON
+${JSON.stringify(ws)}
+>>>
+`;
 }
 
 /** ---------- Handler ---------- */
@@ -303,7 +324,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { mode, messages, code, uid } = parsed.data;
+    const { mode, messages, code, uid, interviewer, topic, autoWorkspace } = parsed.data;
 
     // Guards
     const questionish = messages[messages.length - 1]?.content ?? '';
@@ -319,8 +340,9 @@ export async function POST(req: NextRequest) {
       console.warn('RAG init/lookup failed; continuing without RAG:', (e as any)?.message ?? e);
     }
 
-    // Decide if interviewer mode should be emphasized
-    const interviewerIntent = detectInterviewerIntent(messages);
+    // Decide if interviewer mode should be emphasized (explicit flag wins; heuristic fallback)
+    const interviewerIntent =
+      typeof interviewer === 'boolean' ? interviewer : detectInterviewerIntent(messages);
 
     // Mode track label (Coach tracks)
     const modeTrack =
@@ -328,6 +350,13 @@ export async function POST(req: NextRequest) {
       : mode === 'refactor' ? 'Refactor Track'
       : mode === 'complexity' ? 'Complexity Track'
       : 'Explain Track';
+
+    // Optional topic/workspace guidance to the model
+    const topicLine = interviewerIntent && topic ? `- Interview Topic: ${topic}.\n` : '';
+    const workspaceNote =
+      interviewerIntent && autoWorkspace
+        ? `- A workspace block will be **prepended** to your response by the server. **Do not** emit another workspace block.\n`
+        : '';
 
     // Build the final system prompt
     const systemPrompt =
@@ -337,14 +366,17 @@ export async function POST(req: NextRequest) {
       `- Role Bias: ${interviewerIntent ? 'Interviewer Mode' : 'Coach Mode'}.\n` +
       `- Coach Track: ${modeTrack}.\n` +
       (safeCode ? `- Code Provided: yes (analyze it directly; prioritize grounded findings).\n` : `- Code Provided: no.\n`) +
+      topicLine +
+      `- Preferred workspace language: python.\n` +
+      workspaceNote +
       (ragContext ? `\n### Relevant algorithmic patterns (use as subtle guidance, do not echo verbatim):\n${ragContext}\n` : '');
 
     // Compose messages (normalized)
-    const payload: any = buildMessages(systemPrompt, messages, safeCode); // cast avoids SDK union hassle
+    const payload: any = buildMessages(systemPrompt, messages, safeCode);
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // Streaming response
+    // Streaming response from OpenAI
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini', // swap to 'gpt-4o' for higher quality
       temperature: 0.2,
@@ -354,11 +386,22 @@ export async function POST(req: NextRequest) {
     });
 
     const encoder = new TextEncoder();
+
+    // Prepare optional workspace prelude
+    const shouldPrependWorkspace = !!(interviewerIntent && autoWorkspace);
+    const workspaceBlock = shouldPrependWorkspace ? formatWorkspaceBlock(workspaceForTopic(topic)) : '';
+
+    // Create a stream that first sends the workspace (if any), then the model stream
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         try {
+          // 1) Prepend workspace so client opens panel immediately
+          if (shouldPrependWorkspace && workspaceBlock) {
+            controller.enqueue(encoder.encode(workspaceBlock));
+          }
+          // 2) Pipe model stream
           for await (const chunk of completion) {
-            const delta = chunk.choices?.[0]?.delta?.content;
+            const delta = (chunk as any)?.choices?.[0]?.delta?.content;
             if (delta) controller.enqueue(encoder.encode(delta));
           }
         } catch (e) {

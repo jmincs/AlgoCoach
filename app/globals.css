@@ -37,3 +37,4 @@ input::placeholder, textarea::placeholder {
   color: #888;
 }
 
+@import 'katex/dist/katex.min.css';
