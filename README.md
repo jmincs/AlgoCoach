@@ -76,15 +76,6 @@ With streaming AI responses, interactive modes, and simulated interviews, AlgoCo
 
 ---
 
-## Future Enhancements
-- Support for additional programming languages  
-- Saved sessions and replay functionality  
-- Advanced interview analytics  
-- Deployment on Vercel/AWS with persistence layer  
-- Company-specific interview tracks  
-
----
-
 ## Development Setup
 
 Clone the repository:
