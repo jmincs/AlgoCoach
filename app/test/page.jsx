@@ -40,13 +40,6 @@ async function askCodeBuddy({ mode, messages, code, interviewer, topic, autoWork
 /* =========================
    Constants
    ========================= */
-const COACH_TRACKS = [
-  { value: 'explain', label: 'Explain' },
-  { value: 'debug', label: 'Debug' },
-  { value: 'refactor', label: 'Refactor' },
-  { value: 'complexity', label: 'Complexity' },
-];
-
 const INTERVIEW_TOPICS = [
   'Arrays / Strings',
   'Two Pointers',
@@ -186,19 +179,14 @@ export default function TestPage() {
     {
       role: 'assistant',
       content:
-        "Hey! I'm CodeBuddy. Pick a coach track or toggle Interview Mode to practice. Use “Attach code” to include your snippet.",
+        "Hey! I'm CodeBuddy, your interview practice assistant. Select a topic to start practicing coding interview problems. Use \"Attach code\" to include your snippet.",
     },
   ]);
   const [input, setInput] = useState('');
   const [code, setCode] = useState('');
   const [showCodePanel, setShowCodePanel] = useState(false);
 
-  const [interviewMode, setInterviewMode] = useState(false);
   const [interviewTopic, setInterviewTopic] = useState(INTERVIEW_TOPICS[0]);
-  const [autoAsk, setAutoAsk] = useState(true);
-  const [autoStepsLeft, setAutoStepsLeft] = useState(3);
-
-  const [coachMode, setCoachMode] = useState('debug');
   const [sending, setSending] = useState(false);
 
   // Workspace state
@@ -217,6 +205,7 @@ export default function TestPage() {
   const lastChunkRef = useRef('');
   const rawAssistantBufRef = useRef('');
   const assistantIndexRef = useRef(null);
+  const workspaceParsedForRequestRef = useRef(new Map()); // Track workspace parsing per request
 
   // Runners
   const jsRunnerRef = useRef(null);
@@ -275,15 +264,23 @@ export default function TestPage() {
     const myReqId = ++reqIdRef.current;
     lastChunkRef.current = '';
     rawAssistantBufRef.current = '';
+    
+    // Reset workspace parsed flag for this new request
+    workspaceParsedForRequestRef.current.set(myReqId, false);
+    
+    // Clear workspace at start of new fetch to ensure it gets rewritten
+    // This ensures a fresh workspace for each new problem
+    setWorkspace(null);
+    setWorkspaceCode('');
 
     try {
       await askCodeBuddy({
-        mode: interviewMode ? 'explain' : coachMode,
+        mode: 'explain',
         messages: history,
         code,
-        interviewer: interviewMode,
-        topic: interviewMode ? interviewTopic : undefined,
-        autoWorkspace: !!interviewMode, // ask for workspace automatically in interviewer mode
+        interviewer: true,
+        topic: interviewTopic,
+        autoWorkspace: true, // always ask for workspace in interview mode
         signal: controller.signal,
         onChunk: (delta) => {
           if (myReqId !== reqIdRef.current) return;
@@ -293,15 +290,17 @@ export default function TestPage() {
           // 1) accumulate raw stream
           rawAssistantBufRef.current += delta;
 
-          // 2) parse workspace (once) when JSON block completes
-          // NOTE: scope parsed object locally to avoid "ws is not defined"
-          if (!workspace) {
+          // 2) parse workspace when JSON block completes (always update for new problems)
+          const alreadyParsed = workspaceParsedForRequestRef.current.get(myReqId);
+          if (!alreadyParsed) {
             const parsed = parseWorkspaceIfComplete(rawAssistantBufRef.current);
             const langOk =
               parsed && SUPPORTED_LANGS.includes((parsed.language || '').toLowerCase());
             if (langOk && parsed.starterCode && parsed.functionName) {
+              // Always rewrite workspace for new problem - physically update it
               setWorkspace(parsed);
               setWorkspaceCode(parsed.starterCode);
+              workspaceParsedForRequestRef.current.set(myReqId, true); // Mark as parsed for this request
             }
           }
 
@@ -336,19 +335,6 @@ export default function TestPage() {
       setSending(false);
     }
   };
-
-  // Auto-ask follow-ups in interviewer mode
-  useEffect(() => {
-    if (!interviewMode || !autoAsk || sending || autoStepsLeft <= 0) return;
-    const last = messages[messages.length - 1];
-    if (last?.role === 'assistant' && /\?\s*$/.test(last.content)) {
-      const t = setTimeout(async () => {
-        setAutoStepsLeft((n) => n - 1);
-        await send('continue');
-      }, 1200);
-      return () => clearTimeout(t);
-    }
-  }, [messages, interviewMode, autoAsk, sending, autoStepsLeft]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -475,7 +461,7 @@ export default function TestPage() {
             <div className="font-semibold">CodeBuddy — Test DM</div>
           </div>
         <div className="flex items-center gap-3 text-xs text-gray-500">
-            <span>{interviewMode ? 'Interviewer Mode' : `Coach Mode: ${coachMode}`}</span>
+            <span>Interview Mode</span>
           </div>
         </div>
 
@@ -499,22 +485,10 @@ export default function TestPage() {
               >
                 {showCodePanel ? 'Hide code' : 'Attach code'}
               </button>
-              {interviewMode && (
-                <label className="text-xs flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={autoAsk}
-                    onChange={(e) => setAutoAsk(e.target.checked)}
-                  />
-                  Auto-ask follow-ups
-                </label>
-              )}
             </div>
-            {interviewMode && (
-              <div className="text-xs text-gray-500">
-                Topic: <span className="font-medium">{interviewTopic}</span>
-              </div>
-            )}
+            <div className="text-xs text-gray-500">
+              Topic: <span className="font-medium">{interviewTopic}</span>
+            </div>
           </div>
 
           {/* Code panel */}
@@ -531,9 +505,7 @@ export default function TestPage() {
           <div className="flex gap-2">
             <input
               ref={inputRef}
-              placeholder={
-                interviewMode ? `Ask or respond… (topic: ${interviewTopic})` : 'Type a message…'
-              }
+              placeholder={`Ask or respond… (topic: ${interviewTopic})`}
               className="flex-1 rounded border px-3 py-2"
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -552,58 +524,27 @@ export default function TestPage() {
 
       {/* Right: Controls + Quick Actions + Workspace */}
       <div className="flex flex-col w-full md:w-1/3">
-        {/* Mode */}
+        {/* Interview Settings */}
         <div className="p-4 border-b">
-          <div className="font-semibold mb-2">Mode</div>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={interviewMode}
-              onChange={(e) => {
-                setInterviewMode(e.target.checked);
-                if (e.target.checked) setAutoStepsLeft(3);
-              }}
-            />
-            Interview Mode
-          </label>
+          <div className="font-semibold mb-2">Interview Settings</div>
+          <div className="mt-3">
+            <label className="text-xs text-gray-500">Interview Topic</label>
+            <select
+              className="mt-1 w-full border rounded px-2 py-1 text-sm"
+              value={interviewTopic}
+              onChange={(e) => setInterviewTopic(e.target.value)}
+            >
+              {INTERVIEW_TOPICS.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
 
-          {!interviewMode && (
-            <div className="mt-3">
-              <label className="text-xs text-gray-500">Coach Track</label>
-              <select
-                className="mt-1 w-full border rounded px-2 py-1 text-sm"
-                value={coachMode}
-                onChange={(e) => setCoachMode(e.target.value)}
-              >
-                {COACH_TRACKS.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
+            <div className="mt-2 text-xs text-gray-500">
+              Tip: type <span className="font-mono">start interview</span> to kick it off.
             </div>
-          )}
-
-          {interviewMode && (
-            <div className="mt-3">
-              <label className="text-xs text-gray-500">Interview Topic</label>
-              <select
-                className="mt-1 w-full border rounded px-2 py-1 text-sm"
-                value={interviewTopic}
-                onChange={(e) => setInterviewTopic(e.target.value)}
-              >
-                {INTERVIEW_TOPICS.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-
-              <div className="mt-2 text-xs text-gray-500">
-                Tip: type <span className="font-mono">start interview</span> to kick it off.
-              </div>
-            </div>
-          )}
+          </div>
         </div>
 
         {/* Quick Actions */}
@@ -612,25 +553,6 @@ export default function TestPage() {
           <div className="flex flex-wrap gap-2">
             <QuickButton onClick={() => { setInput('start interview'); inputRef.current?.focus(); }}>
               Start interview
-            </QuickButton>
-            <QuickButton onClick={() => { setInput('Explain Dijkstra vs BFS with a tiny example.'); inputRef.current?.focus(); }}>
-              Explain
-            </QuickButton>
-            <QuickButton
-              onClick={() => {
-                setInput('What is wrong with this code? Give a minimal fix and a tiny test.');
-                inputRef.current?.focus();
-              }}
-            >
-              Debug
-            </QuickButton>
-            <QuickButton
-              onClick={() => {
-                setInput('Analyze time and space complexity and suggest one optimization.');
-                inputRef.current?.focus();
-              }}
-            >
-              Complexity
             </QuickButton>
           </div>
         </div>
