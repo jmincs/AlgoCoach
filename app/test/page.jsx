@@ -1,7 +1,7 @@
 // app/test/page.jsx
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -11,11 +11,31 @@ import 'katex/dist/katex.min.css';
 /* =========================
    Streaming helper
    ========================= */
-async function askCodeBuddy({ mode, messages, code, interviewer, topic, autoWorkspace, onChunk, signal }) {
+async function askCodeBuddy({
+  mode,
+  messages,
+  code,
+  interviewer,
+  topic,
+  autoWorkspace,
+  currentProblemCode,
+  requestNewProblem,
+  onChunk,
+  signal,
+}) {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-    body: JSON.stringify({ mode, messages, code, interviewer, topic, autoWorkspace }),
+    body: JSON.stringify({
+      mode,
+      messages,
+      code,
+      interviewer,
+      topic,
+      autoWorkspace,
+      currentProblemCode,
+      requestNewProblem,
+    }),
     signal,
     cache: 'no-store',
     keepalive: false,
@@ -83,93 +103,6 @@ function parseWorkspaceIfComplete(raw) {
   }
 }
 
-/* =========================
-   JS runner (Web Worker)
-   ========================= */
-function createJsRunnerWorker() {
-  const blob = new Blob(
-    [
-      `
-self.onmessage = async (e) => {
-  const { code, tests, functionName } = e.data;
-  const logs = [];
-  const origLog = console.log;
-  console.log = (...args) => { try { logs.push(args.map(String).join(' ')); } catch {} };
-  function eq(a,b){ try { return JSON.stringify(a) === JSON.stringify(b); } catch(_){ return a===b; } }
-  try {
-    const factory = new Function(code + "\\n; return (typeof " + functionName + " === 'function') ? " + functionName + " : undefined;");
-    const fn = factory();
-    if (!fn) throw new Error("Function '" + functionName + "' not found. Export it as a named function.");
-    const results = [];
-    for (const t of (tests || [])) {
-      try {
-        const got = fn.apply(null, t.args || []);
-        results.push({ name: t.name || 'case', pass: eq(got, t.expect), got, expect: t.expect });
-      } catch (err) {
-        results.push({ name: t.name || 'case', pass: false, error: String(err) });
-      }
-    }
-    postMessage({ type: 'done', results, logs });
-  } catch (err) {
-    postMessage({ type: 'error', error: String(err), logs });
-  } finally {
-    console.log = origLog;
-  }
-};
-      `,
-    ],
-    { type: 'application/javascript' }
-  );
-  return new Worker(URL.createObjectURL(blob));
-}
-
-/* =========================
-   Python runner (Pyodide)
-   ========================= */
-function createPyRunnerWorker() {
-  const blob = new Blob(
-    [
-      `
-let pyodidePromise;
-self.onmessage = async (e) => {
-  const { code, tests, functionName } = e.data;
-  try {
-    if (!pyodidePromise) {
-      importScripts('https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js');
-      pyodidePromise = loadPyodide();
-    }
-    const pyodide = await pyodidePromise;
-
-    await pyodide.runPythonAsync(code);
-
-    const fn = pyodide.globals.get(functionName);
-    if (!fn) throw new Error("Function '" + functionName + "' not found.");
-
-    const results = [];
-    for (const t of (tests || [])) {
-      try {
-        const pyArgs = (t.args || []).map(x => x);
-        let got = fn(...pyArgs);
-        if (got && typeof got.toJs === 'function') {
-          got = got.toJs({ dict_converter: Object.fromEntries });
-        }
-        const pass = JSON.stringify(got) === JSON.stringify(t.expect);
-        results.push({ name: t.name || 'case', pass, got, expect: t.expect });
-      } catch (err) {
-        results.push({ name: t.name || 'case', pass: false, error: String(err) });
-      }
-    }
-    postMessage({ type: 'done', results, logs: [] });
-  } catch (err) {
-    postMessage({ type: 'error', error: String(err), logs: [] });
-  }
-};
-      `,
-    ],
-    { type: 'application/javascript' }
-  );
-  return new Worker(URL.createObjectURL(blob));
-}
 
 /* =========================
    Main component
@@ -192,8 +125,38 @@ export default function TestPage() {
   // Workspace state
   const [workspace, setWorkspace] = useState(null); // {language,functionName,params,starterCode,tests}
   const [workspaceCode, setWorkspaceCode] = useState('');
+  const [customInput, setCustomInput] = useState('');
   const [testResults, setTestResults] = useState(null);
   const [runnerBusy, setRunnerBusy] = useState(false);
+  const runnerTimeoutRef = useRef(null);
+  const clearRunnerTimer = useCallback(() => {
+    if (runnerTimeoutRef.current) {
+      clearTimeout(runnerTimeoutRef.current);
+      runnerTimeoutRef.current = null;
+    }
+  }, []);
+
+  const startRunnerTimer = useCallback(
+    (durationMs = 45000, onTimeout) => {
+      clearRunnerTimer();
+      runnerTimeoutRef.current = setTimeout(() => {
+        runnerTimeoutRef.current = null;
+        setRunnerBusy(false);
+        setTestResults({
+          cases: [],
+          error: 'Execution timed out. Check for infinite loops or try again.',
+        });
+        if (typeof onTimeout === 'function') {
+          try {
+            onTimeout();
+          } catch (_) {
+            // swallow
+          }
+        }
+      }, durationMs);
+    },
+    [clearRunnerTimer]
+  );
 
   const listRef = useRef(null);
   const inputRef = useRef(null);
@@ -205,37 +168,74 @@ export default function TestPage() {
   const lastChunkRef = useRef('');
   const rawAssistantBufRef = useRef('');
   const assistantIndexRef = useRef(null);
-  const workspaceParsedForRequestRef = useRef(new Map()); // Track workspace parsing per request
+  const workspaceRef = useRef(workspace);
 
-  // Runners
-  const jsRunnerRef = useRef(null);
-  const pyRunnerRef = useRef(null);
+  useEffect(() => () => clearRunnerTimer(), [clearRunnerTimer]);
+
   useEffect(() => {
-    jsRunnerRef.current = createJsRunnerWorker();
-    pyRunnerRef.current = createPyRunnerWorker();
+    workspaceRef.current = workspace;
+  }, [workspace]);
 
-    const onMsg = (e) => {
-      const { type, results, logs, error } = e.data || {};
-      if (type === 'done') {
-        setTestResults({ results, logs: logs || [], error: null });
-      } else {
-        setTestResults({ results: [], logs: logs || [], error: error || 'Unknown error' });
-      }
-      setRunnerBusy(false);
-    };
-    jsRunnerRef.current.onmessage = onMsg;
-    pyRunnerRef.current.onmessage = onMsg;
-
-    return () => {
-      jsRunnerRef.current?.terminate();
-      pyRunnerRef.current?.terminate();
-    };
-  }, []);
+  const deriveSuggestedInput = (ws) => {
+    if (!ws?.tests?.length) return '';
+    const first = ws.tests[0];
+    if (!first?.args) return '';
+    const params = ws.params || [];
+    const lines = first.args.map((arg, idx) => {
+      const label = params[idx] ? `${params[idx]} = ` : '';
+      return `${label}${JSON.stringify(arg)}`;
+    });
+    return lines.join('\n');
+  };
 
   // Auto-scroll chat
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, sending]);
+
+  const shouldRequestNewProblem = (content) => {
+    const text = (content || '').trim();
+    if (!text) return !workspaceRef.current;
+    const lower = text.toLowerCase();
+
+    // Existing workspace? If none, always request one.
+    if (!workspaceRef.current) return true;
+
+    // If user pasted code or attached code, assume they are continuing.
+    const hasAttachedCode = !!code.trim();
+    const looksLikeCode =
+      /```/.test(text) ||
+      /def\s+\w+\s*\(/.test(text) ||
+      /class\s+\w+/.test(text);
+    if (hasAttachedCode || looksLikeCode) return false;
+
+    // If explicitly referencing continuing/help, keep same problem.
+    if (
+      /\b(hint|help|complexity|edge case|follow ?up|continue|still|test case|testcase|example|examples|constraints|analysis|approach|solution|explain)\b/.test(
+        lower
+      )
+    ) {
+      return false;
+    }
+
+    // Heuristics: explicit ask for a new problem/question.
+    if (
+      /\bnew\s+(problem|question)\b/.test(lower) ||
+      /\banother\s+(problem|question)\b/.test(lower) ||
+      (lower.startsWith('give me') && /\b(problem|question)\b/.test(lower)) ||
+      (lower.startsWith('ask me') && /\b(problem|question)\b/.test(lower)) ||
+      /\bgive\s+me\b.*\bproblem\b/.test(lower)
+    ) {
+      return true;
+    }
+
+    // If user references a specific topic and requests "problem" or "question".
+    if (/\b(problem|question)\b/.test(lower) && !/\bprevious\b/.test(lower)) {
+      return true;
+    }
+
+    return false;
+  };
 
   // Core send
   const send = async (userContent) => {
@@ -249,6 +249,23 @@ export default function TestPage() {
     const userMsg = { role: 'user', content: userContent || '(no prompt, code only)' };
     const history = [...messages, userMsg];
     setMessages(history);
+
+    const requestNewProblem = shouldRequestNewProblem(userContent);
+    const currentProblemCode = workspaceRef.current?.problemCode;
+    const hasActiveProblem = !!currentProblemCode;
+
+    if (hasActiveProblem && requestNewProblem) {
+      sendingRef.current = false;
+      setSending(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: 'You already have an active problem. Click "End interview" to start a new one.',
+        },
+      ]);
+      return;
+    }
 
     // assistant placeholder
     const assistantIndex = history.length;
@@ -264,14 +281,6 @@ export default function TestPage() {
     const myReqId = ++reqIdRef.current;
     lastChunkRef.current = '';
     rawAssistantBufRef.current = '';
-    
-    // Reset workspace parsed flag for this new request
-    workspaceParsedForRequestRef.current.set(myReqId, false);
-    
-    // Clear workspace at start of new fetch to ensure it gets rewritten
-    // This ensures a fresh workspace for each new problem
-    setWorkspace(null);
-    setWorkspaceCode('');
 
     try {
       await askCodeBuddy({
@@ -281,6 +290,8 @@ export default function TestPage() {
         interviewer: true,
         topic: interviewTopic,
         autoWorkspace: true, // always ask for workspace in interview mode
+        currentProblemCode,
+        requestNewProblem,
         signal: controller.signal,
         onChunk: (delta) => {
           if (myReqId !== reqIdRef.current) return;
@@ -290,17 +301,27 @@ export default function TestPage() {
           // 1) accumulate raw stream
           rawAssistantBufRef.current += delta;
 
-          // 2) parse workspace when JSON block completes (always update for new problems)
-          const alreadyParsed = workspaceParsedForRequestRef.current.get(myReqId);
-          if (!alreadyParsed) {
-            const parsed = parseWorkspaceIfComplete(rawAssistantBufRef.current);
-            const langOk =
-              parsed && SUPPORTED_LANGS.includes((parsed.language || '').toLowerCase());
-            if (langOk && parsed.starterCode && parsed.functionName) {
-              // Always rewrite workspace for new problem - physically update it
+          // 2) parse workspace (once) when JSON block completes
+          // NOTE: scope parsed object locally to avoid "ws is not defined"
+          const parsed = parseWorkspaceIfComplete(rawAssistantBufRef.current);
+          const langOk =
+            parsed && SUPPORTED_LANGS.includes((parsed.language || '').toLowerCase());
+          if (langOk && parsed?.starterCode && parsed?.functionName) {
+            const current = workspaceRef.current;
+            const isDifferent =
+              !current ||
+              current.functionName !== parsed.functionName ||
+              JSON.stringify(current.params || []) !== JSON.stringify(parsed.params || []) ||
+              JSON.stringify(current.tests || []) !== JSON.stringify(parsed.tests || []) ||
+              current.starterCode !== parsed.starterCode ||
+              current.problemCode !== parsed.problemCode ||
+              current.referenceSolution !== parsed.referenceSolution;
+            if (isDifferent) {
+              workspaceRef.current = parsed;
               setWorkspace(parsed);
               setWorkspaceCode(parsed.starterCode);
-              workspaceParsedForRequestRef.current.set(myReqId, true); // Mark as parsed for this request
+              setCustomInput(deriveSuggestedInput(parsed));
+              setTestResults(null);
             }
           }
 
@@ -345,26 +366,154 @@ export default function TestPage() {
     inputRef.current?.focus();
   };
 
-  // Run workspace tests (JS or Python)
-  const runWorkspaceTests = () => {
+  const parseCustomCases = (raw, ws) => {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) return [];
+
+    const paramNames = ws?.params || [];
+    const paramCount = paramNames.length;
+
+    const parseValue = (valueRaw) => {
+      let valueStr = valueRaw.trim();
+      if (!valueStr.length) return '';
+
+      const nameMatch = valueStr.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+      if (nameMatch) valueStr = nameMatch[2].trim();
+
+      try {
+        return JSON.parse(valueStr);
+      } catch {}
+
+      const pythonish = valueStr
+        .replace(/\bNone\b/g, 'null')
+        .replace(/\bTrue\b/g, 'true')
+        .replace(/\bFalse\b/g, 'false');
+      try {
+        return JSON.parse(pythonish);
+      } catch {}
+
+      try {
+        // eslint-disable-next-line no-new-func
+        return Function(`"use strict"; return (${valueStr});`)();
+      } catch {}
+      return valueStr;
+    };
+
+    const blocks = trimmed
+      .split(/\n\s*\n/)
+      .map((block) => block.split('\n').map((line) => line.trim()).filter(Boolean))
+      .filter((lines) => lines.length);
+
+    if (!blocks.length) return [];
+
+    return blocks.map((lines, blockIndex) => {
+      const args = [];
+      if (paramCount === 0) {
+        lines.forEach((line) => {
+          if (line.length) args.push(parseValue(line));
+        });
+      } else {
+        if (lines.length !== paramCount) {
+          throw new Error(
+            `Expected ${paramCount} argument${paramCount === 1 ? '' : 's'} on separate lines (blank line to separate cases).`
+          );
+        }
+        lines.forEach((line) => {
+          args.push(parseValue(line));
+        });
+      }
+
+      return {
+        name: `Case ${blockIndex + 1}`,
+        args,
+      };
+    });
+  };
+
+  // Run workspace evaluation against remote sandbox
+  const runWorkspaceEvaluation = async () => {
     if (!workspace || runnerBusy) return;
+
+    let cases = [];
+    try {
+      cases = parseCustomCases(customInput, workspace);
+    } catch (err) {
+      setTestResults({ cases: [], error: err?.message || 'Invalid custom input.' });
+      return;
+    }
+
+    if (!cases.length) {
+      setTestResults({ cases: [], error: 'Provide at least one test case.' });
+      return;
+    }
+
+    const lang = (workspace.language || '').toLowerCase();
+    if (lang !== 'python') {
+      setTestResults({ cases: [], error: `Remote runner currently supports only Python workspaces (got '${workspace.language}').` });
+      return;
+    }
+
+    if (!workspace.referenceSolution) {
+      setTestResults({ cases: [], error: 'Reference solution unavailable for this workspace.' });
+      return;
+    }
+
     setRunnerBusy(true);
     setTestResults(null);
 
-    const payload = {
-      code: workspaceCode,
-      tests: workspace.tests || [],
-      functionName: workspace.functionName,
-    };
+    const controller = new AbortController();
+    startRunnerTimer(45000, () => controller.abort());
 
-    const lang = (workspace.language || 'javascript').toLowerCase();
-    if (lang === 'python') {
-      pyRunnerRef.current.postMessage(payload);
-    } else if (lang === 'javascript' || lang === 'js') {
-      jsRunnerRef.current.postMessage(payload);
-    } else {
+    try {
+      const resp = await fetch('/api/runner', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          language: 'python',
+          code: workspaceCode || '',
+          functionName: workspace.functionName,
+          referenceCode: workspace.referenceSolution,
+          tests: cases.map((c) => ({ name: c.name, args: c.args })),
+          timeoutMs: 5000,
+        }),
+      });
+
+      clearRunnerTimer();
+
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(body?.error || 'Remote runner failed.');
+      }
+
+      const status = body.status || 'ok';
+      const summaryError =
+        status === 'error'
+          ? body.message || body.error || 'Runner error'
+          : status === 'failed'
+          ? 'Some test cases failed.'
+          : status === 'timeout'
+          ? 'Execution timed out.'
+          : null;
+      const detailMessage =
+        body.details ||
+        (status === 'error' && (body.error || body.message)) ||
+        null;
+
+      setTestResults({
+        status,
+        cases: body.results || [],
+        error: summaryError,
+        details: detailMessage,
+      });
+    } catch (err) {
+      clearRunnerTimer();
+      setTestResults({
+        cases: [],
+        error: err?.name === 'AbortError' ? 'Runner aborted.' : err?.message || 'Runner error',
+      });
+    } finally {
       setRunnerBusy(false);
-      setTestResults({ results: [], logs: [], error: `Runner not available for '${lang}'.` });
     }
   };
 
@@ -455,14 +604,17 @@ export default function TestPage() {
       {/* Left: Chat */}
       <div className="flex flex-col w-full md:w-2/3 border-r">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b bg-white sticky top-0 z-10">
-          <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-full bg-gray-200" />
-            <div className="font-semibold">CodeBuddy — Test DM</div>
-          </div>
-        <div className="flex items-center gap-3 text-xs text-gray-500">
-            <span>Interview Mode</span>
-          </div>
+          <div className="flex items-center justify-between px-4 py-3 border-b bg-white sticky top-0 z-10">
+            <div className="flex items-center gap-2">
+              <div className="h-8 w-8 rounded-full bg-gray-200" />
+              <div className="font-semibold">CodeBuddy — Test DM</div>
+            </div>
+            <div className="flex flex-col items-end text-xs text-gray-500">
+              <span className="font-medium">Interview Mode</span>
+              <span className="text-gray-600">
+                Topic: <span className="font-semibold">{interviewTopic}</span>
+              </span>
+            </div>
         </div>
 
         {/* Messages */}
@@ -475,32 +627,6 @@ export default function TestPage() {
 
         {/* Composer */}
         <form onSubmit={handleSubmit} className="border-t bg-white p-3 space-y-2">
-          {/* Code toggle + status */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowCodePanel((s) => !s)}
-                className="text-sm px-2 py-1 rounded border hover:bg-gray-50"
-              >
-                {showCodePanel ? 'Hide code' : 'Attach code'}
-              </button>
-            </div>
-            <div className="text-xs text-gray-500">
-              Topic: <span className="font-medium">{interviewTopic}</span>
-            </div>
-          </div>
-
-          {/* Code panel */}
-          {showCodePanel && (
-            <textarea
-              placeholder="Paste code here (optional)…"
-              className="w-full h-36 resize-y rounded border p-2 font-mono text-sm"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-            />
-          )}
-
           {/* Input row */}
           <div className="flex gap-2">
             <input
@@ -554,6 +680,24 @@ export default function TestPage() {
             <QuickButton onClick={() => { setInput('start interview'); inputRef.current?.focus(); }}>
               Start interview
             </QuickButton>
+            <QuickButton onClick={() => {
+              workspaceRef.current = null;
+              setWorkspace(null);
+              setWorkspaceCode('');
+              setCustomInput('');
+              setTestResults(null);
+              setMessages([
+                {
+                  role: 'assistant',
+                  content:
+                    "Hey! I'm CodeBuddy, your interview practice assistant. Select a topic to start practicing coding interview problems.",
+                },
+              ]);
+              setInput('');
+              setCode('');
+            }}>
+              End interview
+            </QuickButton>
           </div>
         </div>
 
@@ -582,57 +726,114 @@ export default function TestPage() {
               />
 
               {SUPPORTED_LANGS.includes((workspace.language || '').toLowerCase()) ? (
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={runWorkspaceTests}
-                    disabled={runnerBusy}
-                    className="text-sm px-3 py-1 rounded bg-gray-900 text-white disabled:opacity-60"
-                  >
-                    {runnerBusy ? 'Running…' : 'Run Tests'}
-                  </button>
-                  <span className="text-xs text-gray-500">{workspace.tests?.length || 0} test(s)</span>
-                </div>
+                <>
+                  <div>
+                    <label className="text-xs text-gray-500">Custom Input</label>
+                    <textarea
+                      className="w-full mt-1 h-28 font-mono text-xs border rounded p-2"
+                      value={customInput}
+                      onChange={(e) => setCustomInput(e.target.value)}
+                      placeholder={'nums = [2,7,11,15]\\ntarget = 2'}
+                      spellCheck={false}
+                    />
+                    <div className="text-[10px] text-gray-500 mt-1">
+                      Enter each argument on its own line (optionally <code>name = value</code>). Use a blank line between cases, just like LeetCode inputs.
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mt-2">
+                    <button
+                      type="button"
+                      onClick={runWorkspaceEvaluation}
+                      disabled={runnerBusy}
+                      className="text-sm px-3 py-1 rounded bg-gray-900 text-white disabled:opacity-60"
+                    >
+                      {runnerBusy ? 'Running…' : 'Run Custom Input'}
+                    </button>
+                  </div>
+                  {testResults && (
+                    <div className="text-xs mt-3 space-y-2">
+                      {testResults.status && (
+                        <div className="text-blue-600">{testResults.status}</div>
+                      )}
+                      {testResults.error && (
+                        <div className="text-red-700">{testResults.error}</div>
+                      )}
+                      {testResults.details && (
+                        <pre className="bg-rose-50 border border-rose-200 text-rose-700 rounded p-2 whitespace-pre-wrap break-words">
+                          {testResults.details}
+                        </pre>
+                      )}
+                      {(() => {
+                        const stdoutAggregate = (testResults.cases || [])
+                          .map((t) => t?.userStdout ?? t?.stdout ?? '')
+                          .filter(Boolean)
+                          .join('\n');
+                        if (!stdoutAggregate) return null;
+                        return (
+                          <div>
+                            <div className="font-semibold">Stdout</div>
+                            <pre className="bg-gray-100 border border-gray-200 rounded p-2 whitespace-pre-wrap break-words">
+                              {stdoutAggregate}
+                            </pre>
+                          </div>
+                        );
+                      })()}
+                      {testResults.cases?.length
+                        ? (
+                          <div>
+                            <div className="font-semibold mb-1">Comparison</div>
+                            <ul className="space-y-1">
+                              {testResults.cases.map((t, i) => {
+                                const userStdout = t?.userStdout ?? t?.stdout ?? '';
+                                const referenceStdout = t?.referenceStdout ?? t?.reference_stdout ?? '';
+                                return (
+                                  <li key={i} className={t.pass ? 'text-green-700' : 'text-red-700'}>
+                                    <div>
+                                      <span className="font-semibold">{t.name}</span>: {t.pass ? 'match ✅' : 'mismatch ❌'}
+                                    </div>
+                                    {t.userError ? (
+                                      <div>User error: {t.userError}</div>
+                                    ) : (
+                                      <div>Your output: <code>{JSON.stringify(t.userResult ?? t.got)}</code></div>
+                                    )}
+                                    {userStdout && (
+                                      <div>
+                                        Case stdout:
+                                        <pre className="bg-gray-100 mt-1 rounded p-2 whitespace-pre-wrap break-words">
+                                          {userStdout}
+                                        </pre>
+                                      </div>
+                                    )}
+                                    {t.referenceError ? (
+                                      <div>Reference error: {t.referenceError}</div>
+                                    ) : (
+                                      <>
+                                        {typeof (t.referenceResult ?? t.expect) !== 'undefined' && (
+                                          <div>Reference: <code>{JSON.stringify(t.referenceResult ?? t.expect)}</code></div>
+                                        )}
+                                        {referenceStdout && (
+                                          <div>
+                                            Reference stdout:
+                                            <pre className="bg-gray-100 mt-1 rounded p-2 whitespace-pre-wrap break-words">
+                                              {referenceStdout}
+                                            </pre>
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        )
+                        : null}
+                    </div>
+                  )}
+                </>
               ) : (
                 <div className="text-xs text-amber-700">
                   Running is supported for JavaScript and Python. Current language: {String(workspace.language)}
-                </div>
-              )}
-
-              {testResults && (
-                <div className="text-xs">
-                  <div className="font-semibold mt-2">Results</div>
-                  <ul className="list-disc pl-5 space-y-1">
-                    {testResults.results.map((r, i) => (
-                      <li key={i} className={r.pass ? 'text-green-700' : 'text-red-700'}>
-                        {r.name}: {r.pass ? 'pass' : 'fail'}
-                        {!r.pass && (
-                          <>
-                            {r.error ? (
-                              <> — error: {r.error}</>
-                            ) : (
-                              <>
-                                {' '}
-                                — got: <code>{JSON.stringify(r.got)}</code>, expect:{' '}
-                                <code>{JSON.stringify(r.expect)}</code>
-                              </>
-                            )}
-                          </>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                  {testResults.logs?.length ? (
-                    <>
-                      <div className="font-semibold mt-2">Console</div>
-                      <pre className="bg-gray-100 p-2 rounded overflow-x-auto">
-                        {testResults.logs.join('\n')}
-                      </pre>
-                    </>
-                  ) : null}
-                  {testResults.error && (
-                    <div className="text-red-700 mt-2">Runner error: {testResults.error}</div>
-                  )}
                 </div>
               )}
             </>

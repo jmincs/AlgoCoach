@@ -1,106 +1,115 @@
-# AlgoCoach - Your Personal Coding Mentor & Interview Coach
+<div align="center">
 
-AlgoCoach Interface  
-Next.js • LangChain • OpenAI • Tailwind CSS
+# AlgoCoach — RAG Mock Interview Coach 🤖
+</div>
 
-Real-Time Code Help • AI Interviewer • Complexity Analysis • Debugging Assistance
+<div align="center">
 
----
+  <br />
 
-## Overview
-AlgoCoach is an intelligent coding mentor and mock interviewing platform designed to help you understand algorithms, debug code, and practice technical interviews.  
-With streaming AI responses, interactive modes, and simulated interviews, AlgoCoach adapts to your needs—whether you’re learning, troubleshooting, or preparing for your next interview.
+  [![Next.js](https://img.shields.io/badge/Next.js-15.4.5-black?style=for-the-badge&logo=nextdotjs)](https://nextjs.org/)
+  [![LangChain](https://img.shields.io/badge/LangChain-RAG-purple?style=for-the-badge)](https://www.langchain.com/)
+  [![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4-blue?style=for-the-badge&logo=openai)](https://platform.openai.com/)
+  [![Firebase](https://img.shields.io/badge/Firebase-12.0.0-orange?style=for-the-badge&logo=firebase)](https://firebase.google.com/)
+  [![Docker](https://img.shields.io/badge/Docker-25.0-2496ED?style=for-the-badge&logo=docker)](https://www.docker.com/)
 
----
-
-## Key Features
-
-### AI-Powered Coding Assistant
-- Explain code step by step (`explain` mode)  
-- Find and fix bugs (`debug` mode)  
-- Improve readability and efficiency (`refactor` mode)  
-- Analyze time and space complexity (`complexity` mode)  
-- Support for multiple programming languages  
-
-### Mock Interview Simulator
-- Realistic interview conversations with dynamic follow-ups  
-- Topic-based practice (arrays, graphs, dynamic programming, etc.)  
-- Progressive difficulty adjustment based on responses  
-- Real-time hints and guidance  
-
-### Learning Tools
-- Lightweight RAG (Retrieval-Augmented Generation) knowledge base  
-- Semantic context retrieval powered by LangChain embeddings  
-- Interactive chat interface styled like Discord/Messages  
-- Markdown + Math + KaTeX rendering for rich explanations  
+  <p align="center">
+    <strong>🎯 Customized Training</strong> • <strong>🧠 RAG-Guided Problem Recommendations</strong> • <strong>🧪 Sandbox Coding Workspace</strong>
+  </p>
+</div>
 
 ---
 
-## Technical Architecture
+## 🎯 Overview
 
-### Frontend
-- Framework: Next.js (App Router)  
-- UI: React + Tailwind CSS  
-- Streaming: Fetch API + ReadableStream for live AI responses  
-- Markdown Rendering: React-Markdown with GFM & Math plugins  
-
-### Backend
-- API Routes: Next.js API handlers (`/api/chat`)  
-- AI Integration: OpenAI API  
-- Embeddings: LangChain + OpenAIEmbeddings  
-- Vector Store: In-memory RAG-lite system  
+Context-based DS&A practice environment, pairing a personalized AI interviewer with a fully sandboxed coding workspace that can simulate whiteboard interviews, debug code, and give explanations.
 
 ---
 
-## How It Works
+## ✨ Key Features
 
-1. Select Mode  
-   Choose from explain, debug, refactor, complexity, or interview.  
+### 🤖 AI Interview Coach
+- Topic-aware problem selection (arrays, graphs, DP, etc.).
+- Adaptive follow-up questions and walk-throughs.
+- RAG hints sourced from curated algorithmic notes.
 
-2. Ask a Question or Paste Code  
-   The AI analyzes your input and begins streaming a response.  
+### 🧪 Remote Python Workspace
+- Auto-generated starter code, parameters, tests, and canonical solution.
+- Executes inside the `judge-python` Docker container—no Pyodide hacks.
+- Captures stdout/stderr, compares your output to the reference, and shows per-case diffs.
+- Dedicated stdout panel + per-test stdout snippets for quick inspection.
 
-3. Interactive Feedback  
-   AlgoCoach adapts explanations and interview questions based on your interaction.  
-
-4. Practice and Refine  
-   Continue the conversation, refine solutions, or simulate a full interview.  
-
----
-
-## Performance and Reliability
-- Real-time streaming responses (sub-2 second latency)  
-- Handles code snippets up to 20k characters  
-- Session memory with up to 12 exchanges  
-- Lightweight design—no heavy database required  
+### 🛠 Supporting Assistant Tools
+- Ask for complexity, examples, or clarifications during the interview session.
+- Markdown + KaTeX rendering for math-heavy derivations.
 
 ---
 
-## Development Setup
+## 🛠 Technical Architecture
 
-Clone the repository:
-    
-    git clone https://github.com/your-username/algocoach.git
-    cd algocoach
+```
+Client (Next.js App Router)
+  ├─ /api/chat    → OpenAI + LangChain (interview orchestration)
+  └─ /api/runner  → docker run judge-python → run_submission.py → JSON response
+```
 
-Install dependencies:
-    
-    npm install
-    # or
-    yarn install
-
-Run development server:
-    
-    npm run dev
-
-Open [http://localhost:3000](http://localhost:3000).
+- **Frontend**: React + Tailwind CSS with streaming responses via `ReadableStream`.
+- **Backend**: `/api/chat` handles prompt construction, single-problem guard logic, and RAG context injection.
+- **Sandbox**: `/api/runner` validates payloads and runs user/reference solutions inside Docker.
+- **RAG Store**: Lightweight LangChain vector store to personalize practice for each user.
 
 ---
 
-## Contributing
+## 🧭 How Sessions Work
+
+1. **Start interview** — choose a topic and receive a single NeetCode problem.
+2. **Discuss and code** — brainstorm with the interviewer, request hints/examples, edit Python starter code.
+3. **Run custom input** — enter arguments line-by-line, click **Run Custom Input**, and inspect stdout + comparisons.
+4. **End interview** — clears chat/workspace so you can begin another session.
+
+---
+
+## ⚙️ Development Setup
+
+```bash
+# Install dependencies
+npm install
+
+# Build sandbox image
+cd runner/python
+docker build -t judge-python .
+cd ../../
+
+# Configure environment secrets
+.env.local:
+# Authentication
+OPENAI_API_KEY=your_open_ai_key
+
+# Firebase configurations
+NEXT_PUBLIC_FIREBASE_API_KEY=your_firebase_api_key
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project_id.firebaseapp.com
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your_project_id.appspot.com
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
+NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
+
+# Run server
+npm run dev
+```
+
+Visit [http://localhost:3000](http://localhost:3000) to launch AlgoCoach.
+
+---
+
+## 🤝 Contributing
+
 Contributions are welcome. Please fork the repo, open an issue, or submit a pull request.
 
 ---
 
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## 📄 License
+
+MIT — see [LICENSE](LICENSE) for details.
+
+---
+

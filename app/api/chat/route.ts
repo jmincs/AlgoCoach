@@ -30,6 +30,8 @@ const ChatRequestSchema = z.object({
   interviewer: z.boolean().optional(),
   topic: z.string().optional(),
   autoWorkspace: z.boolean().optional().default(false),
+  currentProblemCode: z.string().nullable().optional(),
+  requestNewProblem: z.boolean().optional().default(false),
 });
 
 /** ---------- Interview Mode System Prompt ---------- */
@@ -163,6 +165,9 @@ type Workspace = {
   params: string[],
   starterCode: string,
   tests: Array<{ name: string, args: any[], expect: any }>,
+  problemCode?: string,
+  problemName?: string,
+  referenceSolution?: string,
 };
 
 type ProblemData = {
@@ -187,6 +192,13 @@ function loadProblemSiteData(): ProblemData[] {
     console.error('Failed to load problem site data:', e);
     return [];
   }
+}
+
+function findProblemByCode(code: string | undefined | null): ProblemData | null {
+  if (!code) return null;
+  const problems = loadProblemSiteData();
+  if (!Array.isArray(problems) || problems.length === 0) return null;
+  return problems.find(p => p.code === code) || null;
 }
 
 // Map interview topics to neetcode patterns
@@ -648,48 +660,24 @@ function workspaceForProblem(selectedProblem: ProblemData): Workspace | null {
   }
   
   // Generate workspace with comprehensive test cases
-    return {
-      language: 'python',
+  return {
+    language: 'python',
     functionName: sig.functionName,
     params: sig.params,
     starterCode: generateStarterCode(sig.functionName, sig.params),
     tests: generateTestCases(sig.functionName, sig.params, selectedProblem.problem, selectedProblem.code),
+    problemCode: selectedProblem.code,
+    problemName: selectedProblem.problem,
+    referenceSolution: code,
   };
 }
 
 // Main function to get workspace from neetcode (backward compatibility)
 function workspaceForTopic(rawTopic?: string): Workspace {
   const selectedProblem = selectProblemForTopic(rawTopic);
-  
-  if (!selectedProblem) {
-    // Fallback to default
-    return {
-      language: 'python',
-      functionName: 'two_sum',
-      params: ['nums', 'target'],
-      starterCode: generateStarterCode('two_sum', ['nums', 'target']),
-      tests: [
-        { name: 'example1', args: [[2, 7, 11, 15], 9], expect: [0, 1] },
-        { name: 'example2', args: [[3, 2, 4], 6], expect: [1, 2] },
-      ],
-    };
-  }
-  
-  const workspace = workspaceForProblem(selectedProblem);
-  if (!workspace) {
-    // Fallback if workspace generation fails
-    return {
-      language: 'python',
-      functionName: 'two_sum',
-      params: ['nums', 'target'],
-      starterCode: generateStarterCode('two_sum', ['nums', 'target']),
-      tests: [
-        { name: 'example1', args: [[2, 7, 11, 15], 9], expect: [0, 1] },
-      ],
-    };
-  }
-  
-  return workspace;
+  const workspace = selectedProblem ? workspaceForProblem(selectedProblem) : null;
+  if (workspace) return workspace;
+  throw new Error('workspaceForTopic: failed to generate workspace');
 }
 
 function formatWorkspaceBlock(ws: Workspace) {
@@ -712,6 +700,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { mode, messages, code, uid, interviewer, topic, autoWorkspace } = parsed.data;
+    const { currentProblemCode, requestNewProblem } = parsed.data;
 
     // Guards
     const questionish = messages[messages.length - 1]?.content ?? '';
@@ -734,26 +723,30 @@ export async function POST(req: NextRequest) {
     let selectedProblem: ProblemData | null = null;
     let workspace: Workspace | null = null;
     const shouldPrependWorkspace = !!autoWorkspace;
-    
+    const persistedProblem = currentProblemCode ? findProblemByCode(currentProblemCode) : null;
+    let guardMessage: string | null = null;
+
     if (shouldPrependWorkspace) {
-      selectedProblem = selectProblemForTopic(topic);
+      if (persistedProblem && requestNewProblem) {
+        guardMessage =
+          'You already have an active problem. Use the "End interview" button to wrap up before starting another.';
+        selectedProblem = persistedProblem;
+      } else if (persistedProblem) {
+        selectedProblem = persistedProblem;
+      } else {
+        selectedProblem = selectProblemForTopic(topic);
+        if (!selectedProblem) {
+          guardMessage =
+            'I could not find a suitable NeetCode problem for that request. Try a different topic.';
+        }
+      }
+
       if (selectedProblem) {
         workspace = workspaceForProblem(selectedProblem);
         if (!workspace) {
-          // Fallback if workspace generation fails
-          workspace = {
-            language: 'python',
-            functionName: 'two_sum',
-            params: ['nums', 'target'],
-            starterCode: generateStarterCode('two_sum', ['nums', 'target']),
-            tests: [
-              { name: 'example1', args: [[2, 7, 11, 15], 9], expect: [0, 1] },
-            ],
-          };
+          console.error('[workspace] Failed to build workspace for problem', selectedProblem.code);
+          guardMessage = 'Sorry, I had trouble loading the workspace. Please try again or end the interview.';
         }
-      } else {
-        // Fallback if no problem selected
-        workspace = workspaceForTopic(topic);
       }
     }
 
@@ -785,7 +778,17 @@ export async function POST(req: NextRequest) {
       (ragContext ? `\n### Relevant algorithmic patterns (use as subtle guidance, do not echo verbatim):\n${ragContext}\n` : '');
 
     // Compose messages (normalized)
-    const payload: any = buildMessages(systemPrompt, messages, safeCode);
+    let payload: any = buildMessages(systemPrompt, messages, safeCode);
+
+    if (guardMessage) {
+      payload = [
+        payload[0],
+        {
+          role: 'assistant',
+          content: guardMessage,
+        },
+      ];
+    }
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
