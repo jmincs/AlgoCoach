@@ -23,5 +23,5 @@
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", "lib/firebase.js", "app/test/page.jsx", "app/page.jsx", "app/layout.jsx"],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "runner-service"]
 }

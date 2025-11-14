@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn } from 'child_process';
-import { once } from 'events';
 import { z } from 'zod';
 
 const RunnerRequestSchema = z.object({
@@ -20,8 +18,6 @@ const RunnerRequestSchema = z.object({
   timeoutMs: z.number().int().positive().max(30_000).default(2_000),
 });
 
-const DEFAULT_IMAGE = 'judge-python';
-const DOCKER_BIN = process.env.DOCKER_BINARY || 'docker';
 const DEFAULT_REFERENCES = {
   python: [
     'from typing import List, Optional, Dict, Set, Tuple',
@@ -30,51 +26,9 @@ const DEFAULT_REFERENCES = {
     'import heapq',
   ].join('\n'),
 } as const;
-const RUNNER_TIMEOUT_MS = 60_000;
-
-async function runInSandbox(payload: unknown) {
-  const docker = spawn(DOCKER_BIN, ['run', '--rm', '-i', DEFAULT_IMAGE], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-
-  const stdoutChunks: Buffer[] = [];
-  const stderrChunks: Buffer[] = [];
-
-  docker.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
-  docker.stderr.on('data', (chunk) => stderrChunks.push(chunk));
-
-  docker.stdin.write(JSON.stringify(payload));
-  docker.stdin.end();
-
-  const timeout = setTimeout(() => {
-    docker.kill('SIGKILL');
-  }, RUNNER_TIMEOUT_MS);
-
-  try {
-    const [code] = (await Promise.race([
-      once(docker, 'close') as Promise<[number]>,
-      once(docker, 'error').then(([err]) => {
-        throw err;
-      }),
-    ])) as [number];
-    clearTimeout(timeout);
-    if (code !== 0) {
-      const stderr = Buffer.concat(stderrChunks).toString('utf-8').trim();
-      throw new Error(stderr || `Sandbox exited with status ${code}`);
-    }
-    const stdout = Buffer.concat(stdoutChunks).toString('utf-8');
-    return stdout;
-  } catch (err) {
-    clearTimeout(timeout);
-    if ((err as any)?.code === 'ENOENT') {
-      const bin = DOCKER_BIN;
-      throw new Error(
-        `Docker binary "${bin}" not found. Install Docker or set DOCKER_BINARY env var to the correct path.`
-      );
-    }
-    throw err;
-  }
-}
+const RUNNER_SERVICE_URL =
+  process.env.RUNNER_SERVICE_URL || 'http://127.0.0.1:4001/run';
+const RUNNER_SERVICE_TIMEOUT_MS = 65_000;
 
 export async function POST(req: NextRequest) {
   try {
@@ -87,18 +41,50 @@ export async function POST(req: NextRequest) {
       functionName: parsed.functionName,
       tests: parsed.tests,
       timeoutMs: parsed.timeoutMs,
-    referenceCode: parsed.referenceCode
-      ? `${DEFAULT_REFERENCES[parsed.language] ?? ''}\n${parsed.referenceCode}`
-      : undefined,
+      referenceCode: parsed.referenceCode
+        ? `${DEFAULT_REFERENCES[parsed.language] ?? ''}\n${parsed.referenceCode}`
+        : undefined,
     };
 
-    const result = await runInSandbox(payload);
-    const body = JSON.parse(result);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), RUNNER_SERVICE_TIMEOUT_MS);
 
-    return NextResponse.json(body, { status: 200 });
+    const response = await fetch(RUNNER_SERVICE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+
+    let body: any = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      const message =
+        body?.error ||
+        `Runner service responded with status ${response.status}`;
+      return NextResponse.json(
+        { error: message, details: body?.details },
+        { status: response.status }
+      );
+    }
+
+    return NextResponse.json(body ?? {}, { status: 200 });
   } catch (err: any) {
-    const message = err?.message || 'Runner error';
+    let message = err?.message || 'Runner error';
     const details = err?.details || undefined;
+    if (err?.name === 'AbortError') {
+      message = 'Runner service timed out.';
+    } else if (
+      err?.code === 'ECONNREFUSED' ||
+      err?.cause?.code === 'ECONNREFUSED'
+    ) {
+      message = `Runner service unreachable at ${RUNNER_SERVICE_URL}.`;
+    }
     return NextResponse.json(
       { error: message, details },
       { status: err instanceof z.ZodError ? 400 : 500 }

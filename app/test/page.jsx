@@ -112,7 +112,7 @@ export default function TestPage() {
     {
       role: 'assistant',
       content:
-        "Hey! I'm CodeBuddy, your interview practice assistant. Select a topic to start practicing coding interview problems. Use \"Attach code\" to include your snippet.",
+        "Hey! I'm CodeBuddy, your interview practice assistant. Select a topic to start practicing coding interview problems.",
     },
   ]);
   const [input, setInput] = useState('');
