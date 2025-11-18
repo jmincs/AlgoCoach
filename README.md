@@ -46,21 +46,11 @@ Context-based DS&A practice environment, pairing a personalized AI interviewer w
 
 ## 🛠 Technical Architecture
 
-```
-Client (Next.js App Router)
-  ├─ /api/chat    → OpenAI + LangChain (interview orchestration)
-  └─ /api/runner  → runner-service proxy → warm docker exec → run_submission.py
 
-runner-service (Express)
-  ├─ Validates requests with Zod
-  ├─ Worker queue + pool (N warm containers)
-  └─ Streams results back to /api/runner
-```
-
-- **Frontend**: React + Tailwind CSS with streaming responses via `ReadableStream`.
-- **Backend**: `/api/chat` handles prompt construction, single-problem guard logic, and RAG context injection.
-- **Sandbox**: `/api/runner` proxies to `runner-service`, which manages a warm Docker worker pool (no per-request container spin-up).
-- **RAG Store**: Lightweight LangChain vector store to personalize practice for each user.
+- **Frontend**: React + Tailwind CSS with streaming responses via `ReadableStream` for real-time AI interactions.
+- **Backend (`/api/chat`)**: Handles prompt construction, single-problem guard logic, and RAG context injection using LangChain and OpenAI GPT-4.
+- **Runner Service**: Express-based microservice that manages a warm Docker worker pool, queues jobs, and distributes execution across multiple containers to eliminate cold-start overhead.
+- **RAG Store**: Lightweight LangChain vector store that personalizes problem recommendations and hints based on user history.
 
 ---
 
@@ -76,17 +66,10 @@ runner-service (Express)
 ## ⚙️ Development Setup
 
 ```bash
-<<<<<<< HEAD
 # Install deps
 npm install
 
 # Build sandbox image 
-=======
-# Install frontend/API deps
-npm install
-
-# Build sandbox image once
->>>>>>> 895c575597be7a5022ca6e629863587fb090be3d
 cd runner/python
 docker build -t judge-python .
 cd ../../
@@ -112,7 +95,7 @@ NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
 # Runner service URL
 RUNNER_SERVICE_URL=http://127.0.0.1:4001/run
 
-# Start services (in separate terminals)
+# Start services 
 npm run dev                 # Next.js app
 cd runner-service && npm run dev   # Express runner
 ```
@@ -131,11 +114,7 @@ docker run -d \
   --name algo-runner-service \
   -p 4001:4001 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-<<<<<<< HEAD
   -e RUNNER_POOL_SIZE=your_pool_size \
-=======
-  -e RUNNER_POOL_SIZE=4 \
->>>>>>> 895c575597be7a5022ca6e629863587fb090be3d
   algo-runner-service
 ```
 
@@ -150,19 +129,11 @@ RUNNER_SERVICE_URL=http://<host>:4001/run
 ### ♨️ runner-service microservice
 
 - Located in `runner-service/`, powered by Express + Zod. It exposes `/run` (execution) and `/healthz` (status).
-<<<<<<< HEAD
-=======
-- Spawns a configurable pool of warm Docker containers (`RUNNER_POOL_SIZE`, default 2) named `${RUNNER_CONTAINER_PREFIX}-N` and queues jobs so no request ever pays the cold-start penalty.
->>>>>>> 895c575597be7a5022ca6e629863587fb090be3d
 - Key environment variables (can be placed in `runner-service/.env`):
 
   ```
   RUNNER_SERVICE_PORT=4001
-<<<<<<< HEAD
   RUNNER_POOL_SIZE=your_pool_size
-=======
-  RUNNER_POOL_SIZE=10    # Match or exceed expected concurrent load
->>>>>>> 895c575597be7a5022ca6e629863587fb090be3d
   RUNNER_IMAGE=judge-python
   RUNNER_CONTAINER_PREFIX=judge-python-worker
   RUNNER_EXEC_TIMEOUT_MS=60000
@@ -170,11 +141,7 @@ RUNNER_SERVICE_URL=http://<host>:4001/run
   ```
 
 - Restarting the service automatically rehydrates the worker pool. To fully reset, run `docker rm -f judge-python-worker-*`.
-<<<<<<< HEAD
 - **CLI Tool**: Utility (`tools/runner-cli/`) is available for health checks, metrics, and container cleanup. Build with `go build -o runner-cli tools/runner-cli/main.go`.
-=======
-- `/metrics` surfaces queue depth, active workers, historical latency, and process memory stats for monitoring/alerting.
->>>>>>> 895c575597be7a5022ca6e629863587fb090be3d
 
 ---
 
