@@ -35,7 +35,7 @@ Context-based DS&A practice environment, pairing a personalized AI interviewer w
 
 ### 🧪 Remote Python Workspace
 - Auto-generated starter code, parameters, tests, and canonical solution.
-- Executes inside the `judge-python` Docker container—no Pyodide hacks.
+- Executes via a dedicated runner microservice that shells into warm `judge-python` containers.
 - Captures stdout/stderr, compares your output to the reference, and shows per-case diffs.
 - Dedicated stdout panel + per-test stdout snippets for quick inspection.
 
@@ -50,12 +50,17 @@ Context-based DS&A practice environment, pairing a personalized AI interviewer w
 ```
 Client (Next.js App Router)
   ├─ /api/chat    → OpenAI + LangChain (interview orchestration)
-  └─ /api/runner  → docker run judge-python → run_submission.py → JSON response
+  └─ /api/runner  → runner-service proxy → warm docker exec → run_submission.py
+
+runner-service (Express)
+  ├─ Validates requests with Zod
+  ├─ Worker queue + pool (N warm containers)
+  └─ Streams results back to /api/runner
 ```
 
 - **Frontend**: React + Tailwind CSS with streaming responses via `ReadableStream`.
 - **Backend**: `/api/chat` handles prompt construction, single-problem guard logic, and RAG context injection.
-- **Sandbox**: `/api/runner` validates payloads and runs user/reference solutions inside Docker.
+- **Sandbox**: `/api/runner` proxies to `runner-service`, which manages a warm Docker worker pool (no per-request container spin-up).
 - **RAG Store**: Lightweight LangChain vector store to personalize practice for each user.
 
 ---
@@ -72,13 +77,18 @@ Client (Next.js App Router)
 ## ⚙️ Development Setup
 
 ```bash
-# Install dependencies
+# Install frontend/API deps
 npm install
 
-# Build sandbox image
+# Build sandbox image once
 cd runner/python
 docker build -t judge-python .
 cd ../../
+
+# Install runner microservice deps
+cd runner-service
+npm install
+cd ..
 
 # Configure environment secrets
 .env.local:
@@ -93,11 +103,57 @@ NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your_project_id.appspot.com
 NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
 NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
 
-# Run server
-npm run dev
+# Runner service URL
+RUNNER_SERVICE_URL=http://127.0.0.1:4001/run
+
+# Start services (in separate terminals)
+npm run dev                 # Next.js app
+cd runner-service && npm run dev   # Express runner
 ```
 
-Visit [http://localhost:3000](http://localhost:3000) to launch AlgoCoach.
+Visit [http://localhost:3000](http://localhost:3000) to launch AlgoCoach once both processes are up.
+
+### 🚀 Deploying runner-service
+
+Build and run the microservice as a container (requires mounting the host Docker socket so it can launch sandboxes):
+
+```bash
+cd runner-service
+docker build -t algo-runner-service .
+
+docker run -d \
+  --name algo-runner-service \
+  -p 4001:4001 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e RUNNER_POOL_SIZE=4 \
+  algo-runner-service
+```
+
+> Tip: pass additional `-e` flags (e.g., `RUNNER_IMAGE`, `RUNNER_CONTAINER_PREFIX`, `DOCKER_BINARY`) to customize the worker fleet.
+
+Point the Next.js app at the deployed service:
+
+```
+RUNNER_SERVICE_URL=http://<host>:4001/run
+```
+
+### ♨️ runner-service microservice
+
+- Located in `runner-service/`, powered by Express + Zod. It exposes `/run` (execution) and `/healthz` (status).
+- Spawns a configurable pool of warm Docker containers (`RUNNER_POOL_SIZE`, default 2) named `${RUNNER_CONTAINER_PREFIX}-N` and queues jobs so no request ever pays the cold-start penalty.
+- Key environment variables (can be placed in `runner-service/.env`):
+
+  ```
+  RUNNER_SERVICE_PORT=4001
+  RUNNER_POOL_SIZE=10    # Match or exceed expected concurrent load
+  RUNNER_IMAGE=judge-python
+  RUNNER_CONTAINER_PREFIX=judge-python-worker
+  RUNNER_EXEC_TIMEOUT_MS=60000
+  # DOCKER_BINARY=/opt/homebrew/bin/docker   # override if needed
+  ```
+
+- Restarting the service automatically rehydrates the worker pool. To fully reset, run `docker rm -f judge-python-worker-*`.
+- `/metrics` surfaces queue depth, active workers, historical latency, and process memory stats for monitoring/alerting.
 
 ---
 
